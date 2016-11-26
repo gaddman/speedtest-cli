@@ -687,7 +687,7 @@ class Speedtest(object):
             self.config.update(config)
 
         self.servers = {}
-        self.closest = []
+        self.matching = []
         self.best = {}
 
         self.results = SpeedtestResults()
@@ -779,13 +779,9 @@ class Speedtest(object):
 
         return self.config
 
-    def get_servers(self, servers=None):
-        """Retrieve a the list of speedtest.net servers, optionally filtered
-        to servers matching those specified in the ``servers`` argument
-        """
-        if servers is None:
-            servers = []
-
+    def get_servers(self):
+        """Retrieve the list of speedtest.net servers"""
+        servers = []
         self.servers.clear()
 
         for i, s in enumerate(servers):
@@ -849,12 +845,6 @@ class Speedtest(object):
                         attrib = server.attrib
                     except AttributeError:
                         attrib = dict(list(server.attributes.items()))
-
-                    if servers and int(attrib.get('id')) not in servers:
-                        continue
-
-                    if int(attrib.get('id')) in self.config['ignore_servers']:
-                        continue
 
                     try:
                         d = distance(self.lat_lon,
@@ -934,25 +924,35 @@ class Speedtest(object):
 
         return self.servers
 
-    def get_closest_servers(self, limit=5):
-        """Limit servers to the closest speedtest.net servers based on
-        geographic distance
+    def get_matching_servers(self, servers=None, limit=5, country=None, sponsor=None):
+        """Limit servers to the closest matching speedtest.net servers based on
+        geographic distance, sponsor, country or a specified list of servers
         """
-
         if not self.servers:
             self.get_servers()
 
         for d in sorted(self.servers.keys()):
             for s in self.servers[d]:
-                self.closest.append(s)
-                if len(self.closest) == limit:
+                if servers and int(s.get('id')) not in servers:
+                    continue
+                if int(s.get('id')) in self.config['ignore_servers']:
+                    continue
+
+                if country and country.lower() != s.get('country').lower():
+                    continue
+                if (sponsor and
+                        sponsor.lower() not in s.get('sponsor').lower()):
+                    continue
+
+                self.matching.append(s)
+                if len(self.matching) == limit:
                     break
             else:
                 continue
             break
 
-        printer(self.closest, debug=True)
-        return self.closest
+        printer(self.matching, debug=True)
+        return self.matching
 
     def get_best_server(self, servers=None):
         """Perform a speedtest.net "ping" to determine which speedtest.net
@@ -960,9 +960,9 @@ class Speedtest(object):
         """
 
         if not servers:
-            if not self.closest:
-                servers = self.get_closest_servers()
-            servers = self.closest
+            if not self.matching:
+                servers = self.get_matching_servers()
+            servers = self.matching
 
         results = {}
         for server in servers:
@@ -1198,8 +1198,14 @@ def parse_args():
     parser.add_argument('--list', action='store_true',
                         help='Display a list of speedtest.net servers '
                              'sorted by distance')
+    parser.add_argument('--limit', type=int,
+                        help='Select the n nearest servers (default is 5)')
     parser.add_argument('--server', help='Specify a server ID to test against',
                         type=PARSER_TYPE_INT)
+    parser.add_argument('--sponsor', help='Select the best server partially '
+                                          'matching sponsor name')
+    parser.add_argument('--country', help='Select the best server matching '
+                                          'country name')
     parser.add_argument('--mini', help='URL of the Speedtest Mini server')
     parser.add_argument('--source', help='Source IP address to bind to')
     parser.add_argument('--timeout', default=10, type=PARSER_TYPE_INT,
@@ -1312,29 +1318,29 @@ def shell():
         printer('Cannot retrieve speedtest configuration')
         sys.exit(1)
 
-    if args.list:
-        try:
-            speedtest.get_servers()
-        except ServersRetrievalError:
-            print_('Cannot retrieve speedtest server list')
-            sys.exit(1)
-
-        for _, servers in sorted(speedtest.servers.items()):
-            for server in servers:
-                line = ('%(id)5s) %(sponsor)s (%(name)s, %(country)s) '
-                        '[%(d)0.2f km]' % server)
-                try:
-                    print_(line)
-                except IOError:
-                    e = sys.exc_info()[1]
-                    if e.errno != errno.EPIPE:
-                        raise
-        sys.exit(0)
-
     # Set a filter of servers to retrieve
     servers = []
     if args.server:
         servers.append(args.server)
+
+    if args.list:
+        try:
+            speedtest.get_matching_servers(servers, args.limit or 0,
+                                 args.country, args.sponsor)
+        except ServersRetrievalError:
+            print_('Cannot retrieve speedtest server list')
+            sys.exit(1)
+
+        for server in sorted(speedtest.matching):
+            line = ('%(id)5s) %(sponsor)s (%(name)s, %(country)s) '
+                    '[%(d)0.2f km]' % server)
+            try:
+                print_(line)
+            except IOError:
+                e = sys.exc_info()[1]
+                if e.errno != errno.EPIPE:
+                    raise
+        sys.exit(0)
 
     printer('Testing from %(isp)s (%(ip)s)...' % speedtest.config['client'],
             quiet)
@@ -1342,7 +1348,8 @@ def shell():
     if not args.mini:
         printer('Retrieving speedtest.net server list...', quiet)
         try:
-            speedtest.get_servers(servers)
+            speedtest.get_matching_servers(servers, args.limit or 5,
+                                 args.country, args.sponsor)
         except NoMatchedServers:
             print_('No matched servers: %s' % args.server)
             sys.exit(1)
